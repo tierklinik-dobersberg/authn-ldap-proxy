@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/apex/log"
 	"github.com/nmcclain/ldap"
@@ -26,11 +28,20 @@ var (
 	}, []string{"baseDN", "success"})
 )
 
+type token struct {
+	access  string
+	refresh string
+	id      int
+}
+
 type ldapServer struct {
 	addr            string
 	baseDN          string
 	nameAttrPrefix  string
 	groupAttrPrefix string
+
+	rw   sync.RWMutex
+	conn map[net.Conn]*token
 
 	authn *authn.AuthN
 	iam   *iamConfig
@@ -79,9 +90,12 @@ func (l *ldapServer) Setup() error {
 		l.addr = ":3893"
 	}
 
+	l.conn = make(map[net.Conn]*token)
+
 	l.server = ldap.NewServer()
 	l.server.BindFunc("", l)
 	l.server.CloseFunc("", l)
+	l.server.SearchFunc("", l)
 
 	return nil
 }
@@ -121,6 +135,73 @@ func (l *ldapServer) Bind(bindDN, bindSimplePw string, conn net.Conn) (ldap.LDAP
 	return code, err
 }
 
+func (l *ldapServer) Search(bindDN string, searchReq ldap.SearchRequest, conn net.Conn) (ldap.ServerSearchResult, error) {
+	log.Infof("request from %s for %s", bindDN, searchReq.Filter)
+	token, ok := l.getAccessToken(conn)
+	if !ok {
+		return ldap.ServerSearchResult{ResultCode: ldap.LDAPResultOperationsError}, errors.New("invalid sessions")
+	}
+
+	filterEntity, err := ldap.GetFilterObjectClass(searchReq.Filter)
+	if err != nil {
+		return ldap.ServerSearchResult{ResultCode: ldap.LDAPResultOperationsError}, fmt.Errorf("Search Error: error parsing filter: %s", searchReq.Filter)
+	}
+
+	if filterEntity != "posixaccount" && filterEntity != "" {
+		return ldap.ServerSearchResult{ResultCode: ldap.LDAPResultOperationsError}, fmt.Errorf("Search Error: unhandled filter type: %s [%s]", filterEntity, searchReq.Filter)
+	}
+
+	cli, err := client.New(client.Config{
+		Server: l.iam.Host,
+		Token:  token.access,
+	})
+	if err != nil {
+		return ldap.ServerSearchResult{ResultCode: ldap.LDAPResultOperationsError}, err
+	}
+
+	users, err := cli.ListUsers(context.Background())
+	if err != nil {
+		return ldap.ServerSearchResult{ResultCode: ldap.LDAPResultOperationsError}, err
+	}
+
+	var result ldap.ServerSearchResult
+	result.ResultCode = ldap.LDAPResultSuccess
+
+	for _, u := range users {
+		attrs := []*ldap.EntryAttribute{}
+		add := func(name string, values ...string) {
+			attrs = append(attrs, &ldap.EntryAttribute{
+				Name:   name,
+				Values: values,
+			})
+		}
+
+		add("cn", u.Username)
+		add("uid", u.Username)
+		add("givenName", u.Firstname)
+		add("sn", u.Lastname)
+		add("mail", u.MailAddress)
+		add("phone", u.PhoneNumber)
+		add("objectClass", "posixAccount")
+
+		if u.Locked != nil {
+			if *u.Locked {
+				add("accountStatus", "inactive")
+			} else {
+				add("accountStatus", "active")
+			}
+		}
+
+		dn := fmt.Sprintf("%s=%s,%s", l.nameAttrPrefix, u.Username, l.baseDN)
+		result.Entries = append(result.Entries, &ldap.Entry{
+			DN:         dn,
+			Attributes: attrs,
+		})
+	}
+
+	return result, nil
+}
+
 // Bind implements ldap.Binder
 func (l *ldapServer) bind(bindDN, bindSimplePw string, conn net.Conn) (ldap.LDAPResultCode, error) {
 	username := bindDN
@@ -149,7 +230,6 @@ func (l *ldapServer) bind(bindDN, bindSimplePw string, conn net.Conn) (ldap.LDAP
 
 	accountID, accessToken, refreshToken, err := doLogin(context.Background(), l.authn.Host, username, bindSimplePw)
 	if err == nil {
-		// TODO(ppacher): immediately revoke the access and refresh tokens
 		_, _ = accessToken, refreshToken
 		id, err := strconv.Atoi(accountID)
 		if err != nil {
@@ -175,6 +255,7 @@ func (l *ldapServer) bind(bindDN, bindSimplePw string, conn net.Conn) (ldap.LDAP
 			for _, g := range groups {
 				log.Infof(g.Name)
 				if g.Name == groupname {
+					l.cacheAccessToken(conn, id, accessToken, refreshToken)
 					return ldap.LDAPResultSuccess, nil
 				}
 			}
@@ -182,6 +263,7 @@ func (l *ldapServer) bind(bindDN, bindSimplePw string, conn net.Conn) (ldap.LDAP
 			return ldap.LDAPResultInvalidCredentials, nil
 		}
 
+		l.cacheAccessToken(conn, id, accessToken, refreshToken)
 		return ldap.LDAPResultSuccess, nil
 	}
 
@@ -194,7 +276,36 @@ func (l *ldapServer) bind(bindDN, bindSimplePw string, conn net.Conn) (ldap.LDAP
 }
 
 func (l *ldapServer) Close(boundDN string, conn net.Conn) error {
+	// TODO(ppacher): immediately revoke the access and refresh tokens
 	log.WithField("bindDN", boundDN).Infof("connection closing")
 
+	l.deleteToken(conn)
+
 	return nil
+}
+
+func (l *ldapServer) cacheAccessToken(conn net.Conn, id int, access, refresh string) {
+	l.rw.Lock()
+	defer l.rw.Unlock()
+
+	l.conn[conn] = &token{
+		access:  access,
+		refresh: refresh,
+		id:      id,
+	}
+}
+
+func (l *ldapServer) getAccessToken(conn net.Conn) (*token, bool) {
+	l.rw.RLock()
+	defer l.rw.RUnlock()
+
+	t, ok := l.conn[conn]
+	return t, ok
+}
+
+func (l *ldapServer) deleteToken(conn net.Conn) {
+	l.rw.Lock()
+	defer l.rw.Unlock()
+
+	delete(l.conn, conn)
 }
