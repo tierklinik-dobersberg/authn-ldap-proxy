@@ -7,9 +7,20 @@ import (
 
 	"github.com/apex/log"
 	"github.com/nmcclain/ldap"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/tierklinik-dobersberg/micro/pkg/auth/authn"
 	"github.com/tierklinik-dobersberg/micro/pkg/config"
 	"github.com/tierklinik-dobersberg/micro/pkg/service"
+)
+
+var (
+	totalBindRequests = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "ldapd",
+		Subsystem: "ldap",
+		Name:      "bind_requests_total",
+		Help:      "Total number of LDAP bind requests served",
+	}, []string{"baseDN", "success"})
 )
 
 type ldapServer struct {
@@ -84,8 +95,28 @@ func (l *ldapServer) Shutdown(ctx context.Context) error {
 	}
 }
 
-// Bind implements ldap.Binder
 func (l *ldapServer) Bind(bindDN, bindSimplePw string, conn net.Conn) (ldap.LDAPResultCode, error) {
+	code, err := l.bind(bindDN, bindSimplePw, conn)
+
+	if err == nil {
+		var status string
+		switch code {
+		case ldap.LDAPResultSuccess:
+			status = "success"
+		case ldap.LDAPResultInvalidCredentials:
+			status = "failed"
+		default:
+			status = "error"
+		}
+
+		totalBindRequests.WithLabelValues(l.baseDN, status).Inc()
+	}
+
+	return code, err
+}
+
+// Bind implements ldap.Binder
+func (l *ldapServer) bind(bindDN, bindSimplePw string, conn net.Conn) (ldap.LDAPResultCode, error) {
 	username := bindDN
 	groupname := ""
 
