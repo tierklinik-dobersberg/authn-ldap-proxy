@@ -2,6 +2,7 @@ package main
 
 import (
 	"log"
+	"sync"
 
 	"github.com/ory/graceful"
 	"github.com/tierklinik-dobersberg/micro/pkg/auth/authn"
@@ -35,14 +36,24 @@ func main() {
 	if err := instance.InitRouter(); err != nil {
 		log.Fatal(err)
 	}
-	go func() {
-		if err := server.Serve(instance); err != nil {
-			log.Fatal(err)
-		}
-	}()
+
+	var wg sync.WaitGroup
+
+	if server.DefaultServer.Addr != "" {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			if err := server.Serve(instance); err != nil {
+				log.Fatal(err)
+			}
+		}()
+	}
 
 	// Actually start serving LDAP connections
 	if err := graceful.Graceful(ldap.Serve, ldap.Shutdown); err != nil {
 		log.Fatal(err)
 	}
+
+	wg.Wait()
 }
