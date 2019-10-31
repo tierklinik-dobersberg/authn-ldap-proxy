@@ -3,8 +3,6 @@ package main
 import (
 	"context"
 	"net"
-	"net/http"
-	"net/url"
 	"strings"
 
 	"github.com/apex/log"
@@ -15,7 +13,11 @@ import (
 )
 
 type ldapServer struct {
-	addr  string
+	addr            string
+	baseDN          string
+	nameAttrPrefix  string
+	groupAttrPrefix string
+
 	authn *authn.AuthN
 
 	server *ldap.Server
@@ -25,6 +27,32 @@ func (l *ldapServer) Directive() service.Directive {
 	return service.Directive{
 		Name: "ldap",
 		Init: func(s *service.Instance, c config.Dispenser) error {
+			c.Next()
+
+			for c.NextBlock() {
+				switch strings.ToLower(c.Val()) {
+				case "basedn", "dn":
+					if !c.NextArg() {
+						return c.ArgErr()
+					}
+					l.baseDN = c.Val()
+
+				case "nameattr":
+					if !c.NextArg() {
+						return c.ArgErr()
+					}
+					l.nameAttrPrefix = c.Val()
+
+				case "groupattr":
+					if !c.NextArg() {
+						return c.ArgErr()
+					}
+					l.groupAttrPrefix = c.Val()
+
+				default:
+					return c.SyntaxErr("unexpected keyword")
+				}
+			}
 
 			return nil
 		},
@@ -58,29 +86,46 @@ func (l *ldapServer) Shutdown(ctx context.Context) error {
 
 // Bind implements ldap.Binder
 func (l *ldapServer) Bind(bindDN, bindSimplePw string, conn net.Conn) (ldap.LDAPResultCode, error) {
-	form := url.Values{}
-	form.Add("username", bindDN)
-	form.Add("password", bindSimplePw)
+	username := bindDN
+	groupname := ""
 
-	req, err := http.NewRequest("POST", l.authn.Host+"/session", strings.NewReader(form.Encode()))
-	if err != nil {
-		log.Errorf(err.Error())
-		return ldap.LDAPResultOperationsError, nil
+	// if we have a BaseDN make sure bindDN uses it
+	// and extract the correct username out of it
+	if l.baseDN != "" {
+		if !strings.HasSuffix(bindDN, l.baseDN) {
+			return ldap.LDAPResultInvalidCredentials, nil
+		}
+
+		parts := strings.Split(strings.TrimSuffix(bindDN, l.baseDN), ",")
+
+		switch len(parts) {
+		case 1: // only username
+			username = strings.TrimPrefix(parts[0], l.nameAttrPrefix+"=")
+		case 2:
+			username = strings.TrimPrefix(parts[0], l.nameAttrPrefix+"=")
+			groupname = strings.TrimPrefix(parts[1], l.groupAttrPrefix+"=")
+		default:
+			// TODO(ppacher): log error
+			return ldap.LDAPResultInvalidCredentials, nil
+		}
 	}
 
-	req.Header.Add("Origin", "ldap://app.example.com")
-	req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
+	accessToken, refreshToken, err := doLogin(context.Background(), l.authn.Host, username, bindSimplePw)
+	if err == nil {
+		// TODO(ppacher): immediately revoke the access and refresh tokens
+		_, _ = accessToken, refreshToken
 
-	res, err := http.DefaultClient.Do(req)
-	if err != nil {
-		log.Errorf(err.Error())
-		return ldap.LDAPResultOperationsError, nil
-	}
+		if groupname != "" {
+			// make sure the user that tries to authenticate is actually part of that group
+		}
 
-	if res.StatusCode == 201 {
 		return ldap.LDAPResultSuccess, nil
 	}
-	log.Errorf(res.Status)
+
+	log.WithFields(log.Fields{
+		"error":  err.Error(),
+		"bindDN": bindDN,
+	}).Warnf("failed to authenticate")
 
 	return ldap.LDAPResultInvalidCredentials, nil
 }

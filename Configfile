@@ -10,4 +10,8 @@ metrics {
     subsystem ldap
 }
 
-ldap
+ldap {
+    baseDN dc=example,dc=com
+    nameAttr uid
+    groupAttr cn
+}
