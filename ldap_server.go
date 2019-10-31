@@ -93,6 +93,11 @@ func (l *ldapServer) Setup() error {
 	l.conn = make(map[net.Conn]*token)
 
 	l.server = ldap.NewServer()
+
+	// EnforceLDAP tells the ldap library to do the heavy filtering stuff
+	// so we don't need to handle all of that on our own (and still don't respond with
+	// too much data)
+	l.server.EnforceLDAP = true
 	l.server.BindFunc("", l)
 	l.server.CloseFunc("", l)
 	l.server.SearchFunc("", l)
@@ -136,7 +141,7 @@ func (l *ldapServer) Bind(bindDN, bindSimplePw string, conn net.Conn) (ldap.LDAP
 }
 
 func (l *ldapServer) Search(bindDN string, searchReq ldap.SearchRequest, conn net.Conn) (ldap.ServerSearchResult, error) {
-	log.Infof("request from %s for %s", bindDN, searchReq.Filter)
+	log.Infof("request from %s for %s on %s in scope %s", bindDN, searchReq.Filter, searchReq.BaseDN, ldap.ScopeMap[searchReq.Scope])
 	token, ok := l.getAccessToken(conn)
 	if !ok {
 		return ldap.ServerSearchResult{ResultCode: ldap.LDAPResultOperationsError}, errors.New("invalid sessions")
@@ -167,6 +172,13 @@ func (l *ldapServer) Search(bindDN string, searchReq ldap.SearchRequest, conn ne
 	var result ldap.ServerSearchResult
 	result.ResultCode = ldap.LDAPResultSuccess
 
+	/*
+		filter, err := ldap.CompileFilter(searchReq.Filter)
+		if err != nil {
+			return ldap.ServerSearchResult{ResultCode: ldap.LDAPResultOperationsError}, err
+		}
+	*/
+
 	for _, u := range users {
 		attrs := []*ldap.EntryAttribute{}
 		add := func(name string, values ...string) {
@@ -193,10 +205,24 @@ func (l *ldapServer) Search(bindDN string, searchReq ldap.SearchRequest, conn ne
 		}
 
 		dn := fmt.Sprintf("%s=%s,%s", l.nameAttrPrefix, u.Username, l.baseDN)
-		result.Entries = append(result.Entries, &ldap.Entry{
+		entry := &ldap.Entry{
 			DN:         dn,
 			Attributes: attrs,
-		})
+		}
+
+		/*
+			keep, code := ldap.ServerApplyFilter(filter, entry)
+			if code != ldap.LDAPResultSuccess {
+				return ldap.ServerSearchResult{ResultCode: code}, errors.New("ServerApplyFilter error")
+			}
+
+			if !keep {
+				log.Infof("skipping request for %s", u.Username)
+				continue
+			}
+		*/
+
+		result.Entries = append(result.Entries, entry)
 	}
 
 	return result, nil
