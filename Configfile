@@ -1,0 +1,13 @@
+authn http://auth.example.com:8080 {
+    username hello
+    password world
+}
+
+http :18080
+metrics {
+    path /metrics
+    namespace iam
+    subsystem ldap
+}
+
+ldap
