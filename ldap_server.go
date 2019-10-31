@@ -2,13 +2,16 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"net"
+	"strconv"
 	"strings"
 
 	"github.com/apex/log"
 	"github.com/nmcclain/ldap"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
+	"github.com/tierklinik-dobersberg/iam/pkg/client"
 	"github.com/tierklinik-dobersberg/micro/pkg/auth/authn"
 	"github.com/tierklinik-dobersberg/micro/pkg/config"
 	"github.com/tierklinik-dobersberg/micro/pkg/service"
@@ -30,6 +33,7 @@ type ldapServer struct {
 	groupAttrPrefix string
 
 	authn *authn.AuthN
+	iam   *iamConfig
 
 	server *ldap.Server
 }
@@ -110,6 +114,8 @@ func (l *ldapServer) Bind(bindDN, bindSimplePw string, conn net.Conn) (ldap.LDAP
 		}
 
 		totalBindRequests.WithLabelValues(l.baseDN, status).Inc()
+	} else {
+		log.Errorf(err.Error())
 	}
 
 	return code, err
@@ -127,7 +133,7 @@ func (l *ldapServer) bind(bindDN, bindSimplePw string, conn net.Conn) (ldap.LDAP
 			return ldap.LDAPResultInvalidCredentials, nil
 		}
 
-		parts := strings.Split(strings.TrimSuffix(bindDN, l.baseDN), ",")
+		parts := strings.Split(strings.TrimSuffix(bindDN, ","+l.baseDN), ",")
 
 		switch len(parts) {
 		case 1: // only username
@@ -137,17 +143,43 @@ func (l *ldapServer) bind(bindDN, bindSimplePw string, conn net.Conn) (ldap.LDAP
 			groupname = strings.TrimPrefix(parts[1], l.groupAttrPrefix+"=")
 		default:
 			// TODO(ppacher): log error
-			return ldap.LDAPResultInvalidCredentials, nil
+			return ldap.LDAPResultInvalidCredentials, fmt.Errorf("invalid bindDN: %s (%d)", bindDN, len(parts))
 		}
 	}
 
-	accessToken, refreshToken, err := doLogin(context.Background(), l.authn.Host, username, bindSimplePw)
+	accountID, accessToken, refreshToken, err := doLogin(context.Background(), l.authn.Host, username, bindSimplePw)
 	if err == nil {
 		// TODO(ppacher): immediately revoke the access and refresh tokens
 		_, _ = accessToken, refreshToken
+		id, err := strconv.Atoi(accountID)
+		if err != nil {
+			log.Errorf("invalid creds: %s", err.Error())
+			return ldap.LDAPResultInvalidCredentials, err
+		}
 
-		if groupname != "" {
-			// make sure the user that tries to authenticate is actually part of that group
+		if groupname != "" && l.iam.Host != "" {
+			cli, err := client.New(client.Config{
+				Server: l.iam.Host,
+				Token:  accessToken,
+			})
+			if err != nil {
+				return ldap.LDAPResultInvalidCredentials, err
+			}
+
+			log.Infof("loading groups ...")
+			groups, err := cli.GetUserGroups(context.Background(), id)
+			if err != nil {
+				return ldap.LDAPResultInvalidCredentials, err
+			}
+
+			for _, g := range groups {
+				log.Infof(g.Name)
+				if g.Name == groupname {
+					return ldap.LDAPResultSuccess, nil
+				}
+			}
+
+			return ldap.LDAPResultInvalidCredentials, nil
 		}
 
 		return ldap.LDAPResultSuccess, nil
@@ -158,7 +190,7 @@ func (l *ldapServer) bind(bindDN, bindSimplePw string, conn net.Conn) (ldap.LDAP
 		"bindDN": bindDN,
 	}).Warnf("failed to authenticate")
 
-	return ldap.LDAPResultInvalidCredentials, nil
+	return ldap.LDAPResultInvalidCredentials, err
 }
 
 func (l *ldapServer) Close(boundDN string, conn net.Conn) error {

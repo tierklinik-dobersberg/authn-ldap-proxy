@@ -15,6 +15,7 @@ import (
 func main() {
 	ldap := ldapServer{
 		authn: authn.New(),
+		iam:   &iamConfig{},
 	}
 
 	instance := service.NewInstance(service.Config{
@@ -25,6 +26,7 @@ func main() {
 			server.Directive(),
 			ldap.Directive(),
 			ldap.authn.Directive(),
+			ldap.iam.Directive(),
 		},
 	})
 

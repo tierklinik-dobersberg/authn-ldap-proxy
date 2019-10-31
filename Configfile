@@ -3,6 +3,8 @@ authn http://auth.example.com:8080 {
     password world
 }
 
+iam http://auth.example.com:8090
+
 http :18080
 metrics {
     path /metrics

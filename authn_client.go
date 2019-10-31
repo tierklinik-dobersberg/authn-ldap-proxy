@@ -7,9 +7,11 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+
+	"gopkg.in/square/go-jose.v2/jwt"
 )
 
-func doLogin(ctx context.Context, host, username, password string) (string, string, error) {
+func doLogin(ctx context.Context, host, username, password string) (string, string, string, error) {
 	form := url.Values{}
 
 	form.Add("username", username)
@@ -17,7 +19,7 @@ func doLogin(ctx context.Context, host, username, password string) (string, stri
 
 	req, err := http.NewRequestWithContext(ctx, "POST", host+"/session", strings.NewReader(form.Encode()))
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 
 	req.Header.Add("Origin", "ldap://app.example.com")
@@ -25,7 +27,7 @@ func doLogin(ctx context.Context, host, username, password string) (string, stri
 
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 
 	if res.StatusCode == 201 {
@@ -36,7 +38,7 @@ func doLogin(ctx context.Context, host, username, password string) (string, stri
 		}
 
 		if err := json.NewDecoder(res.Body).Decode(&result); err != nil {
-			return "", "", err
+			return "", "", "", err
 		}
 
 		var refreshToken string
@@ -46,8 +48,19 @@ func doLogin(ctx context.Context, host, username, password string) (string, stri
 			}
 		}
 
-		return result.Result.Token, refreshToken, nil
+		tok, err := jwt.ParseSigned(result.Result.Token)
+		if err != nil {
+			return "", "", "", err
+		}
+
+		claims := jwt.Claims{}
+		// TODO(ppacher): actually verify the token ....
+		if err := tok.UnsafeClaimsWithoutVerification(&claims); err != nil {
+			return "", "", "", err
+		}
+
+		return claims.Subject, result.Result.Token, refreshToken, nil
 	}
 
-	return "", "", errors.New(res.Status)
+	return "", "", "", errors.New(res.Status)
 }
