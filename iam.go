@@ -18,7 +18,6 @@ func (iam *iamConfig) Directive() service.Directive {
 			if !c.NextArg() {
 				return c.ArgErr()
 			}
-
 			iam.Host = c.Val()
 
 			return nil

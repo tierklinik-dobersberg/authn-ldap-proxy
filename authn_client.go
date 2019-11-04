@@ -11,7 +11,7 @@ import (
 	"gopkg.in/square/go-jose.v2/jwt"
 )
 
-func doLogin(ctx context.Context, host, username, password string) (string, string, string, error) {
+func doLogin(ctx context.Context, host, origin, username, password string) (string, string, string, error) {
 	form := url.Values{}
 
 	form.Add("username", username)
@@ -22,7 +22,7 @@ func doLogin(ctx context.Context, host, username, password string) (string, stri
 		return "", "", "", err
 	}
 
-	req.Header.Add("Origin", "ldap://app.example.com")
+	req.Header.Add("Origin", origin)
 	req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
 
 	res, err := http.DefaultClient.Do(req)

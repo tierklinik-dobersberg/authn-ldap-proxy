@@ -39,6 +39,7 @@ type ldapServer struct {
 	baseDN          string
 	nameAttrPrefix  string
 	groupAttrPrefix string
+	origin          string
 
 	rw   sync.RWMutex
 	conn map[net.Conn]*token
@@ -75,6 +76,12 @@ func (l *ldapServer) Directive() service.Directive {
 					}
 					l.groupAttrPrefix = c.Val()
 
+				case "origin", "audience":
+					if !c.NextArg() {
+						return c.ArgErr()
+					}
+					l.origin = c.Val()
+
 				default:
 					return c.SyntaxErr("unexpected keyword")
 				}
@@ -98,9 +105,16 @@ func (l *ldapServer) Setup() error {
 	// so we don't need to handle all of that on our own (and still don't respond with
 	// too much data)
 	l.server.EnforceLDAP = true
+
 	l.server.BindFunc("", l)
 	l.server.CloseFunc("", l)
 	l.server.SearchFunc("", l)
+
+	// if there's no origin configured we'll use the hostname
+	// of authn-server
+	if l.origin == "" {
+		l.origin = l.authn.Host
+	}
 
 	return nil
 }
@@ -254,7 +268,7 @@ func (l *ldapServer) bind(bindDN, bindSimplePw string, conn net.Conn) (ldap.LDAP
 		}
 	}
 
-	accountID, accessToken, refreshToken, err := doLogin(context.Background(), l.authn.Host, username, bindSimplePw)
+	accountID, accessToken, refreshToken, err := doLogin(context.Background(), l.authn.Host, l.origin, username, bindSimplePw)
 	if err == nil {
 		_, _ = accessToken, refreshToken
 		id, err := strconv.Atoi(accountID)

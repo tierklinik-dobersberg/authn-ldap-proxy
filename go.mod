@@ -1,4 +1,4 @@
-module github.com/tierklinik-dobersberg/ldapd
+module github.com/tierklinik-dobersberg/authn-ldap-proxy
 
 go 1.13
 
